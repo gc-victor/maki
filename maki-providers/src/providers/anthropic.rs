@@ -1,6 +1,4 @@
 //! Anthropic API provider with prompt caching.
-//! Cache breakpoints: 1 on tools (last element), 1 on system prompt, 2 on the last two messages
-//! (last content block each). This consumes all 4 of Anthropic's allowed breakpoints.
 
 use std::env;
 use std::sync::{Arc, Mutex};
@@ -26,11 +24,7 @@ const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const MODELS_URL: &str = "https://api.anthropic.com/v1/models?limit=1000";
 const BETA_ADVANCED_TOOL_USE: &str = "advanced-tool-use-2025-11-20";
 
-/// Anthropic caches conversation by blocks (tools -> system -> messages).
-/// We use 1 cache breakpoint for the last tool block, and 1 for the system prompt.
-/// We're allowed to set up to 4 breakpoints. So we're left with 2 to use for messages.
-///
-/// See https://platform.claude.com/docs/en/build-with-claude/prompt-caching.
+/// Reserve the last two cache breakpoints for the latest messages.
 const MESSAGE_CACHE_BREAKPOINTS: usize = 2;
 
 #[derive(Serialize)]
@@ -275,7 +269,7 @@ fn resolve_auth() -> Result<super::ResolvedAuth, AgentError> {
 }
 
 #[derive(Deserialize)]
-struct Usage {
+pub(crate) struct Usage {
     #[serde(default)]
     input_tokens: u32,
     #[serde(default)]
@@ -298,19 +292,19 @@ impl From<Usage> for TokenUsage {
 }
 
 #[derive(Deserialize)]
-struct MessagePayload {
+pub(crate) struct MessagePayload {
     #[serde(default)]
     usage: Option<Usage>,
 }
 
 #[derive(Deserialize)]
-struct MessageStartEvent {
+pub(crate) struct MessageStartEvent {
     message: MessagePayload,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum SseContentBlock {
+pub(crate) enum SseContentBlock {
     Text,
     Thinking,
     RedactedThinking { data: String },
@@ -318,14 +312,14 @@ enum SseContentBlock {
 }
 
 #[derive(Deserialize)]
-struct ContentBlockStartEvent {
+pub(crate) struct ContentBlockStartEvent {
     index: usize,
     content_block: SseContentBlock,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
-enum Delta {
+pub(crate) enum Delta {
     #[serde(rename = "text_delta")]
     Text { text: String },
     #[serde(rename = "thinking_delta")]
@@ -337,19 +331,19 @@ enum Delta {
 }
 
 #[derive(Deserialize)]
-struct ContentBlockDeltaEvent {
+pub(crate) struct ContentBlockDeltaEvent {
     index: usize,
     delta: Delta,
 }
 
 #[derive(Deserialize)]
-struct MessageDeltaPayload {
+pub(crate) struct MessageDeltaPayload {
     #[serde(default)]
     stop_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct MessageDeltaEvent {
+pub(crate) struct MessageDeltaEvent {
     #[serde(default)]
     delta: Option<MessageDeltaPayload>,
     #[serde(default)]
@@ -391,8 +385,12 @@ impl Anthropic {
         self
     }
 
-    fn build_request(&self, method: &str, url: Option<&str>) -> isahc::http::request::Builder {
-        let auth = self.auth.lock().unwrap();
+    fn build_request(
+        &self,
+        method: &str,
+        url: Option<&str>,
+        auth: &super::ResolvedAuth,
+    ) -> isahc::http::request::Builder {
         let url = url.unwrap_or_else(|| auth.base_url.as_deref().unwrap_or(MESSAGES_URL));
         let mut builder = Request::builder()
             .method(method)
@@ -408,10 +406,23 @@ impl Anthropic {
         &self,
         body: &Value,
         event_tx: &Sender<ProviderEvent>,
+        auth: &super::ResolvedAuth,
+    ) -> Result<StreamResponse, AgentError> {
+        self.do_stream_request_with_url(body, event_tx, None, auth)
+            .await
+    }
+
+    /// Stream a pre-built body, optionally to a custom URL with explicit auth.
+    pub(crate) async fn do_stream_request_with_url(
+        &self,
+        body: &Value,
+        event_tx: &Sender<ProviderEvent>,
+        url: Option<&str>,
+        auth: &super::ResolvedAuth,
     ) -> Result<StreamResponse, AgentError> {
         let json_body = serde_json::to_vec(body)?;
         let request = self
-            .build_request("POST", None)
+            .build_request("POST", url, auth)
             .header("content-type", "application/json")
             .body(json_body)?;
         let response = self.client.send_async(request).await?;
@@ -434,7 +445,8 @@ impl Anthropic {
                 url.push_str(&format!("&after_id={cursor}"));
             }
 
-            let request = self.build_request("GET", Some(&url)).body(())?;
+            let auth = (*self.auth.lock().unwrap()).clone();
+            let request = self.build_request("GET", Some(&url), &auth).body(())?;
             let mut response = self.client.send_async(request).await?;
             if response.status().as_u16() != 200 {
                 return Err(AgentError::from_response(response).await);
@@ -467,38 +479,18 @@ impl Provider for Anthropic {
         _session_id: Option<&str>,
     ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
         Box::pin(async move {
-            let wire_messages = build_wire_messages(messages);
-            let wire_tools = build_wire_tools(tools);
-            let system_block = SystemBlock {
-                r#type: "text",
-                text: system,
-                cache_control: Some(EPHEMERAL),
-            };
-
-            let system_blocks = if let Some(prefix) = &self.system_prefix {
-                let prefix_block = SystemBlock {
-                    r#type: "text",
-                    text: prefix,
-                    cache_control: None,
-                };
-                json!([prefix_block, system_block])
-            } else {
-                json!([system_block])
-            };
-
-            let mut body = json!({
-                "model": model.id,
-                "max_tokens": model.max_output_tokens,
-                "system": system_blocks,
-                "messages": wire_messages,
-                "tools": wire_tools,
-                "stream": true,
-            });
-
+            let mut body = build_body(
+                model,
+                messages,
+                tools,
+                system,
+                self.system_prefix.as_deref(),
+            );
             thinking.apply_to_body(&mut body);
 
             debug!(model = %model.id, num_messages = messages.len(), ?thinking, "sending API request");
-            self.do_stream_request(&body, event_tx).await
+            let auth = (*self.auth.lock().unwrap()).clone();
+            self.do_stream_request(&body, event_tx, &auth).await
         })
     }
 
@@ -590,7 +582,45 @@ fn build_wire_tools(tools: &Value) -> Value {
     Value::Array(out)
 }
 
-async fn parse_sse(
+/// Build an Anthropic request body with prompt caching.
+pub(crate) fn build_body(
+    model: &Model,
+    messages: &[Message],
+    tools: &Value,
+    system: &str,
+    system_prefix: Option<&str>,
+) -> Value {
+    let wire_messages = build_wire_messages(messages);
+    let wire_tools = build_wire_tools(tools);
+    let system_block = SystemBlock {
+        r#type: "text",
+        text: system,
+        cache_control: Some(EPHEMERAL),
+    };
+
+    let system_blocks = match system_prefix {
+        Some("") | None => json!([system_block]),
+        Some(prefix) => json!([
+            SystemBlock {
+                r#type: "text",
+                text: prefix,
+                cache_control: None,
+            },
+            system_block
+        ]),
+    };
+
+    json!({
+        "model": model.id,
+        "max_tokens": model.max_output_tokens,
+        "system": system_blocks,
+        "messages": wire_messages,
+        "tools": wire_tools,
+        "stream": true,
+    })
+}
+
+pub(crate) async fn parse_sse(
     response: isahc::Response<isahc::AsyncBody>,
     event_tx: &Sender<ProviderEvent>,
     stream_timeout: Duration,
@@ -1074,5 +1104,52 @@ data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usa
                 matches!(&resp.message.content[1], ContentBlock::Text { text } if text == "Hi")
             );
         })
+    }
+
+    fn test_model() -> Model {
+        Model::from_spec("anthropic/claude-sonnet-4-5").unwrap()
+    }
+
+    #[test]
+    fn build_body_empty_system_prefix_yields_single_block() {
+        let model = test_model();
+        let messages = vec![Message::user("hello".into())];
+        let tools = json!([]);
+
+        let body_none = build_body(&model, &messages, &tools, "sys", None);
+        let body_empty = build_body(&model, &messages, &tools, "sys", Some(""));
+
+        let sys_none = body_none["system"].as_array().unwrap();
+        let sys_empty = body_empty["system"].as_array().unwrap();
+
+        assert_eq!(
+            sys_none.len(),
+            1,
+            "None prefix should yield one system block"
+        );
+        assert_eq!(
+            sys_empty.len(),
+            1,
+            "empty string prefix should yield one system block"
+        );
+
+        assert_eq!(sys_none[0]["text"], "sys");
+        assert_eq!(sys_empty[0]["text"], "sys");
+    }
+
+    #[test]
+    fn build_body_nonempty_prefix_yields_two_blocks() {
+        let model = test_model();
+        let messages = vec![Message::user("hello".into())];
+        let tools = json!([]);
+
+        let body = build_body(&model, &messages, &tools, "sys", Some("prefix"));
+
+        let sys = body["system"].as_array().unwrap();
+        assert_eq!(sys.len(), 2);
+        assert_eq!(sys[0]["text"], "prefix");
+        assert!(sys[0].get("cache_control").is_none());
+        assert_eq!(sys[1]["text"], "sys");
+        assert_eq!(sys[1]["cache_control"]["type"], "ephemeral");
     }
 }

@@ -7,7 +7,7 @@ use tracing::{debug, warn};
 
 use crate::model::Model;
 use crate::provider::{BoxFuture, Provider};
-use crate::{AgentError, Message, ProviderEvent, StreamResponse, ThinkingConfig};
+use crate::{AgentError, Message, ProviderEvent, StreamResponse, ThinkingConfig, TokenUsage};
 
 use super::auth;
 use crate::providers::ResolvedAuth;
@@ -119,18 +119,39 @@ impl OpenAi {
     }
 
     fn codex_auth(&self) -> Result<ResolvedAuth, AgentError> {
-        // Prefer OAuth tokens for the ChatGPT Coding Plan backend.
+        // Prefer Coding Plan OAuth tokens when available.
         if let Some(storage) = self.storage.as_ref()
             && let Some(tokens) = maki_storage::auth::load_tokens(storage, auth::PROVIDER)
         {
             return Ok(auth::build_coding_plan_resolved(&tokens));
         }
-        // Fall back to standard API key via the Responses API.
+        // Otherwise use the standard API key.
         let mut auth = self.current_auth();
         if auth.base_url.is_none() {
             auth.base_url = Some(CONFIG.base_url.into());
         }
         Ok(auth)
+    }
+
+    /// Stream to `/responses` with a custom usage parser.
+    pub(crate) async fn do_responses_with_parse(
+        &self,
+        model: &Model,
+        body: &serde_json::Value,
+        event_tx: &Sender<ProviderEvent>,
+        auth: &ResolvedAuth,
+        parse_usage: fn(&serde_json::Value) -> TokenUsage,
+    ) -> Result<StreamResponse, AgentError> {
+        super::responses::do_stream_with_parse(
+            self.compat.client(),
+            model,
+            body,
+            event_tx,
+            auth,
+            self.compat.stream_timeout(),
+            parse_usage,
+        )
+        .await
     }
 }
 
