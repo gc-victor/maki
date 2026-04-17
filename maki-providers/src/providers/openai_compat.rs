@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use flume::Sender;
 use futures_lite::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use isahc::{AsyncReadResponseExt, HttpClient, Request};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{debug, warn};
 
@@ -94,9 +94,29 @@ impl OpenAiCompatProvider {
         event_tx: &Sender<ProviderEvent>,
         auth: &ResolvedAuth,
     ) -> Result<StreamResponse, AgentError> {
+        self.do_stream_with_path(
+            model,
+            extra_headers,
+            body,
+            event_tx,
+            auth,
+            "/chat/completions",
+        )
+        .await
+    }
+
+    pub async fn do_stream_with_path(
+        &self,
+        model: &crate::model::Model,
+        extra_headers: &[(String, String)],
+        body: &Value,
+        event_tx: &Sender<ProviderEvent>,
+        auth: &ResolvedAuth,
+        path: &str,
+    ) -> Result<StreamResponse, AgentError> {
         let json_body = serde_json::to_vec(body)?;
         let mut request = self
-            .build_request("POST", "/chat/completions", auth)
+            .build_request("POST", path, auth)
             .header("content-type", "application/json");
         for (key, value) in extra_headers {
             request = request.header(key.as_str(), value.as_str());
@@ -107,6 +127,7 @@ impl OpenAiCompatProvider {
         debug!(
             model = %model.id,
             provider = self.config.provider_name,
+            path = %path,
             "sending API request"
         );
 
@@ -310,13 +331,13 @@ struct ChunkChoice {
     finish_reason: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct PromptTokensDetails {
     #[serde(default)]
     cached_tokens: u32,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct ChunkUsage {
     #[serde(default)]
     prompt_tokens: u32,
@@ -343,6 +364,46 @@ pub async fn parse_sse(
     event_tx: &Sender<ProviderEvent>,
     stream_timeout: Duration,
 ) -> Result<StreamResponse, AgentError> {
+    parse_sse_with_usage(reader, event_tx, stream_timeout, default_usage_parser).await
+}
+
+fn default_usage_parser(u: &Value) -> TokenUsage {
+    let cached = u
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .or_else(|| {
+            u.get("input_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+        })
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let input = u
+        .get("prompt_tokens")
+        .or_else(|| u.get("input_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let output = u
+        .get("completion_tokens")
+        .or_else(|| u.get("output_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    TokenUsage {
+        input: input.saturating_sub(cached),
+        output,
+        cache_read: cached,
+        cache_creation: 0,
+    }
+}
+
+pub async fn parse_sse_with_usage<F>(
+    reader: impl AsyncBufRead + Unpin,
+    event_tx: &Sender<ProviderEvent>,
+    stream_timeout: Duration,
+    usage_parser: F,
+) -> Result<StreamResponse, AgentError>
+where
+    F: Fn(&Value) -> TokenUsage,
+{
     let mut lines = reader.lines();
 
     let mut text = String::new();
@@ -379,16 +440,8 @@ pub async fn parse_sse(
         };
 
         if let Some(u) = chunk.usage {
-            let cached = u
-                .prompt_tokens_details
-                .map(|d| d.cached_tokens)
-                .unwrap_or(0);
-            usage = TokenUsage {
-                input: u.prompt_tokens.saturating_sub(cached),
-                output: u.completion_tokens,
-                cache_read: cached,
-                cache_creation: 0,
-            };
+            let usage_value = serde_json::to_value(u).unwrap_or_default();
+            usage = usage_parser(&usage_value);
         }
 
         let Some(choice) = chunk.choices.into_iter().next() else {

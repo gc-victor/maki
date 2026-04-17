@@ -13,6 +13,7 @@ pub use model::{
 };
 pub use providers::Timeouts;
 pub use providers::dynamic;
+pub use providers::github_copilot::auth as github_copilot_auth;
 pub use providers::openai::auth as openai_auth;
 pub use types::{
     ContentBlock, ImageMediaType, ImageSource, Message, ProviderEvent, Role, StopReason,

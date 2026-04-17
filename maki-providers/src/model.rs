@@ -10,7 +10,9 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::provider::ProviderKind;
-use crate::providers::{anthropic, dynamic, google, mistral, ollama, openai, synthetic, zai};
+use crate::providers::{
+    anthropic, dynamic, github_copilot, google, mistral, ollama, openai, synthetic, zai,
+};
 
 const PER_MILLION: f64 = 1_000_000.0;
 
@@ -96,7 +98,7 @@ pub struct ModelEntry {
     pub context_window: u32,
 }
 
-fn lookup_entry<'a>(
+pub(crate) fn lookup_entry<'a>(
     entries: &'a [ModelEntry],
     model_id: &str,
 ) -> Result<&'a ModelEntry, ModelError> {
@@ -115,6 +117,7 @@ pub fn models_for_provider(provider: ProviderKind) -> &'static [ModelEntry] {
         ProviderKind::Google => google::models(),
         ProviderKind::Zai | ProviderKind::ZaiCodingPlan => zai::models(),
         ProviderKind::Synthetic => synthetic::models(),
+        ProviderKind::GitHubCopilot => github_copilot::models(),
     }
 }
 
@@ -134,16 +137,21 @@ pub struct Model {
     pub dynamic_slug: Option<String>,
     pub tier: ModelTier,
     pub family: ModelFamily,
-    pub supports_tool_examples_override: Option<bool>,
     pub pricing: ModelPricing,
     pub max_output_tokens: u32,
     pub context_window: u32,
+    pub supports_tool_examples_override: Option<bool>,
 }
 
 impl Model {
     pub fn supports_tool_examples(&self) -> bool {
-        self.supports_tool_examples_override
-            .unwrap_or_else(|| self.family.supports_tool_examples())
+        if let Some(override_value) = self.supports_tool_examples_override {
+            return override_value;
+        }
+        match (self.provider, self.family) {
+            (ProviderKind::GitHubCopilot, ModelFamily::Claude) => false,
+            _ => self.family.supports_tool_examples(),
+        }
     }
 
     pub fn spec(&self) -> String {
@@ -217,10 +225,10 @@ impl Model {
                 dynamic_slug: None,
                 tier,
                 family,
-                supports_tool_examples_override: None,
                 pricing,
                 max_output_tokens,
                 context_window,
+                supports_tool_examples_override: None,
             });
         }
 
@@ -236,10 +244,10 @@ impl Model {
                 dynamic_slug: Some(provider_str.to_string()),
                 tier: entry.tier,
                 family: entry.family,
-                supports_tool_examples_override: None,
                 pricing: entry.pricing.clone(),
                 max_output_tokens: entry.max_output_tokens,
                 context_window: entry.context_window,
+                supports_tool_examples_override: None,
             });
         }
 
@@ -406,5 +414,16 @@ mod tests {
         assert_eq!(model.provider, expected_provider);
         assert_eq!(model.id, expected_id);
         assert_eq!(model.family, expected_provider.family());
+    }
+
+    #[test]
+    fn tool_example_support_respects_provider_overrides() {
+        let anthropic = Model::from_spec("anthropic/claude-sonnet-4").unwrap();
+        let github_copilot_claude = Model::from_spec("github-copilot/claude-sonnet-4").unwrap();
+        let github_copilot_gpt = Model::from_spec("github-copilot/gpt-4o").unwrap();
+
+        assert!(anthropic.supports_tool_examples());
+        assert!(!github_copilot_claude.supports_tool_examples());
+        assert!(github_copilot_gpt.supports_tool_examples());
     }
 }

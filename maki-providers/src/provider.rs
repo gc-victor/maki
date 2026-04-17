@@ -10,6 +10,7 @@ use crate::model::{Model, ModelFamily, models_for_provider};
 use crate::providers::Timeouts;
 use crate::providers::anthropic::Anthropic;
 use crate::providers::dynamic;
+use crate::providers::github_copilot;
 use crate::providers::google::Google;
 use crate::providers::mistral::Mistral;
 use crate::providers::ollama::Ollama;
@@ -30,6 +31,8 @@ pub enum ProviderKind {
     Zai,
     ZaiCodingPlan,
     Synthetic,
+    #[strum(serialize = "github-copilot")]
+    GitHubCopilot,
 }
 
 impl ProviderKind {
@@ -43,6 +46,7 @@ impl ProviderKind {
             Self::Zai => "Z.AI",
             Self::ZaiCodingPlan => "Z.AI Coding",
             Self::Synthetic => "Synthetic",
+            Self::GitHubCopilot => "GitHub Copilot",
         }
     }
 
@@ -55,6 +59,7 @@ impl ProviderKind {
             Self::Mistral => "MISTRAL_API_KEY",
             Self::Zai | Self::ZaiCodingPlan => "ZHIPU_API_KEY",
             Self::Synthetic => "SYNTHETIC_API_KEY",
+            Self::GitHubCopilot => "",
         }
     }
 
@@ -68,13 +73,14 @@ impl ProviderKind {
             Self::Zai => "https://api.z.ai/api/paas/v4",
             Self::ZaiCodingPlan => "https://api.z.ai/api/coding/paas/v4",
             Self::Synthetic => "https://api.synthetic.new/openai/v1",
+            Self::GitHubCopilot => "",
         }
     }
 
     pub const fn supports_thinking(self) -> bool {
         matches!(
             self,
-            Self::Anthropic | Self::Google | Self::Mistral | Self::Synthetic
+            Self::Anthropic | Self::Google | Self::Mistral | Self::Synthetic | Self::GitHubCopilot
         )
     }
 
@@ -101,6 +107,7 @@ impl ProviderKind {
             Self::Mistral => ModelFamily::Generic,
             Self::Zai | Self::ZaiCodingPlan => ModelFamily::Glm,
             Self::Synthetic => ModelFamily::Synthetic,
+            Self::GitHubCopilot => ModelFamily::Gpt,
         }
     }
 
@@ -117,6 +124,7 @@ impl ProviderKind {
             Self::Mistral => 32_000,
             Self::Zai | Self::ZaiCodingPlan => 16_000,
             Self::Synthetic => 32_000,
+            Self::GitHubCopilot => 100_000,
         }
     }
 
@@ -129,6 +137,7 @@ impl ProviderKind {
             Self::Mistral => 128_000,
             Self::Zai | Self::ZaiCodingPlan => 128_000,
             Self::Synthetic => 128_000,
+            Self::GitHubCopilot => 200_000,
         }
     }
 
@@ -142,6 +151,7 @@ impl ProviderKind {
             Self::Zai => Ok(Box::new(Zai::new(ZaiPlan::Standard, timeouts)?)),
             Self::ZaiCodingPlan => Ok(Box::new(Zai::new(ZaiPlan::Coding, timeouts)?)),
             Self::Synthetic => Ok(Box::new(Synthetic::new(timeouts)?)),
+            Self::GitHubCopilot => Ok(Box::new(github_copilot::GitHubCopilot::new()?)),
         }
     }
 
@@ -268,5 +278,26 @@ pub async fn fetch_all_models(mut on_ready: impl FnMut(ModelBatch)) {
 
     while let Ok(batch) = rx.recv_async().await {
         on_ready(batch);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderKind;
+
+    #[test]
+    fn supports_thinking_includes_expected_providers() {
+        assert!(ProviderKind::Anthropic.supports_thinking());
+        assert!(ProviderKind::Mistral.supports_thinking());
+        assert!(ProviderKind::Synthetic.supports_thinking());
+        assert!(ProviderKind::GitHubCopilot.supports_thinking());
+    }
+
+    #[test]
+    fn supports_thinking_excludes_expected_providers() {
+        assert!(!ProviderKind::OpenAi.supports_thinking());
+        assert!(!ProviderKind::Ollama.supports_thinking());
+        assert!(!ProviderKind::Zai.supports_thinking());
+        assert!(!ProviderKind::ZaiCodingPlan.supports_thinking());
     }
 }
