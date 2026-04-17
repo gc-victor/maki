@@ -21,7 +21,7 @@ use tracing_subscriber::EnvFilter;
 
 use maki_providers::model::{Model, ModelTier};
 use maki_providers::provider::{ProviderKind, fetch_all_models};
-use maki_providers::{dynamic, openai_auth};
+use maki_providers::{dynamic, github_copilot_auth, openai_auth};
 use maki_storage::log::RotatingFileWriter;
 use maki_storage::model::{persist_model, read_model};
 use print::OutputFormat;
@@ -223,10 +223,12 @@ fn run() -> Result<()> {
             match action {
                 AuthAction::Login { provider } => match provider.as_str() {
                     "openai" => openai_auth::login(&storage)?,
+                    "github-copilot" => github_copilot_auth::login(&storage)?,
                     slug => dynamic::login(slug)?,
                 },
                 AuthAction::Logout { provider } => match provider.as_str() {
                     "openai" => openai_auth::logout(&storage)?,
+                    "github-copilot" => github_copilot_auth::logout(&storage)?,
                     slug => dynamic::logout(slug)?,
                 },
             }
