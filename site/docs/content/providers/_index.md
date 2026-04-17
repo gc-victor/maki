@@ -108,6 +108,29 @@ Defaults: glm-5-code (strong), glm-4.7-flash (weak), glm-4.7 (medium)
 
 Defaults: hf:moonshotai/Kimi-K2.5 (strong), hf:deepseek-ai/DeepSeek-V3.2 (medium), hf:zai-org/GLM-4.7-Flash (weak)
 
+### GitHub Copilot
+
+- **Auth**: Device login flow
+
+Run `maki auth login github-copilot` to start the device flow. This opens a browser window where you authorize Maki to access your GitHub Copilot subscription. The process takes about 30 seconds. Once done, your tokens are stored securely and refreshed automatically.
+
+#### V1 Limits
+
+This is a V1 implementation with the following limits:
+- Static model listing. New models must be added to Maki via code updates.
+- No enterprise support. Only individual GitHub Copilot subscriptions work.
+- No PAT or API key authentication. Only device login is supported.
+
+- **Features**: Device OAuth flow, static model catalog
+
+| Tier | Models | Pricing (in/out per 1M tokens) | Context |
+|------|--------|-------------------------------|---------|
+| Weak | claude-haiku-4.5, gemini-3-flash-preview, gpt-4o, **gpt-5-mini** (default), gpt-5.4-mini | $0.00 / $0.00 | 144K ctx / 32K out |
+| Medium | claude-sonnet-4, claude-sonnet-4.5, **claude-sonnet-4.6** (default), gemini-2.5-pro, grok-code-fast-1, gpt-5.2-codex, gpt-5.3-codex | $0.00 / $0.00 | 216K ctx / 16K out |
+| Strong | claude-opus-4.5, claude-opus-4.6, claude-opus-4.7, gemini-3.1-pro-preview, gpt-4.1, gpt-5.2, **gpt-5.4** (default) | $0.00 / $0.00 | 160K ctx / 32K out |
+
+Defaults: gpt-5-mini (weak), claude-sonnet-4.6 (medium), gpt-5.4 (strong)
+
 ## Model Identifiers
 
 Models are referenced as `provider/model_id`:
@@ -116,6 +139,7 @@ Models are referenced as `provider/model_id`:
 anthropic/claude-sonnet-4-6
 openai/gpt-4.1
 zai/glm-4.7
+github-copilot/gpt-5.4
 ```
 
 If the model name is unique across providers, the prefix can be omitted.
@@ -135,7 +159,7 @@ To add a custom provider or proxy, drop an executable script into `~/.maki/provi
 
 `resolve` is called each time a new agent spawns, so scripts should read tokens from disk instead of caching them in memory. That way auth changes from other processes get picked up.
 
-The `base` field specifies which built-in provider to inherit the model catalog from. Valid values: `anthropic`, `openai`, `google`, `ollama`, `mistral`, `zai`, `zai-coding-plan`, `synthetic`.
+The `base` field specifies which built-in provider to inherit the model catalog from. Valid values: `anthropic`, `openai`, `google`, `ollama`, `mistral`, `zai`, `zai-coding-plan`, `synthetic`, `github-copilot`.
 
 If your provider serves models not in the base catalog, add a `models` subcommand returning:
 

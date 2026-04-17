@@ -24,6 +24,7 @@ Models are referenced as `provider/model_id`:
 anthropic/claude-sonnet-4-6
 openai/gpt-4.1
 zai/glm-4.7
+github-copilot/gpt-5.4
 ```
 
 If the model name is unique across providers, the prefix can be omitted."#;
@@ -141,6 +142,15 @@ fn build_sections() -> Vec<ProviderSection> {
                     entries: models_for_provider(kind),
                 });
             }
+            ProviderKind::GitHubCopilot => {
+                sections.push(ProviderSection {
+                    name: kind.display_name(),
+                    auth_line: "Device login flow (see below)".to_string(),
+                    urls: vec![],
+                    features: Some("Device OAuth flow, static model catalog"),
+                    entries: models_for_provider(kind),
+                });
+            }
             _ => {
                 sections.push(ProviderSection {
                     name: kind.display_name(),
@@ -223,11 +233,48 @@ fn write_model_table(out: &mut String, entries: &[ModelEntry]) {
 
 fn write_section(out: &mut String, section: &ProviderSection) {
     let _ = writeln!(out, "### {}\n", section.name);
+
+    // Special handling for GitHub Copilot device login
+    if section.name == "GitHub Copilot" {
+        let _ = writeln!(out, "- **Auth**: Device login flow");
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "Run `maki auth login github-copilot` to start the device flow. This opens a browser window where you authorize Maki to access your GitHub Copilot subscription. The process takes about 30 seconds. Once done, your tokens are stored securely and refreshed automatically."
+        );
+        let _ = writeln!(out);
+        let _ = writeln!(out, "#### V1 Limits");
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "This is a V1 implementation with the following limits:"
+        );
+        let _ = writeln!(
+            out,
+            "- Static model listing. New models must be added to Maki via code updates."
+        );
+        let _ = writeln!(
+            out,
+            "- No enterprise support. Only individual GitHub Copilot subscriptions work."
+        );
+        let _ = writeln!(
+            out,
+            "- No PAT or API key authentication. Only device login is supported."
+        );
+        let _ = writeln!(out);
+        if let Some(features) = section.features {
+            let _ = writeln!(out, "- **Features**: {features}");
+        }
+        let _ = writeln!(out);
+        write_model_table(out, section.entries);
+        return;
+    }
+
     let _ = writeln!(out, "- **Env var**: {}", section.auth_line);
 
     if section.urls.len() == 1 {
         let _ = writeln!(out, "- **API**: `{}`", section.urls[0]);
-    } else {
+    } else if !section.urls.is_empty() {
         let _ = writeln!(out, "- **API endpoints**:");
         for url in &section.urls {
             let _ = writeln!(out, "  - `{url}`");
